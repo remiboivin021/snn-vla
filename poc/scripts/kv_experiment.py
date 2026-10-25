@@ -28,17 +28,23 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.data.loader import get_dataloader
+from src.models.kv_quant import GroupedKVQuantizer
 from src.models.quantizer import AnchorQuantizer
 from src.models.vla_model import VLAModel
 
 MIB = 1024 * 1024
 
-# (name, bits, outlier fraction); bits=None is the fp16 baseline
+# kind 'anchor': our scheme (static offline calibration, outlier channels in fp16)
+# kind 'grouped': KIVI / Kitty re-implementation (dynamic per-group statistics)
 VARIANTS = [
-    ('fp16 (baseline)', None, 0.0),
-    ('2-bit anchor, 5% outliers (ours)', 2, 0.05),
-    ('2-bit anchor, 10% outliers', 2, 0.10),
-    ('2-bit naive, no outliers', 2, 0.0),
+    {'name': 'fp16 (baseline)', 'kind': 'fp16'},
+    {'name': '2-bit anchor, 5% outliers (ours)', 'kind': 'anchor', 'outliers': 0.05},
+    {'name': '2-bit anchor, 10% outliers', 'kind': 'anchor', 'outliers': 0.10},
+    {'name': '2-bit naive, no outliers', 'kind': 'anchor', 'outliers': 0.0},
+    {'name': 'KIVI K2V2', 'kind': 'grouped', 'boost': 0.0, 'sinks': 0},
+    {'name': 'KIVI K2V2* (+32 sink tokens)', 'kind': 'grouped', 'boost': 0.0, 'sinks': 32},
+    {'name': 'Kitty (12.5% 4-bit key channels)', 'kind': 'grouped', 'boost': 0.125, 'sinks': 32},
+    {'name': 'Kitty-Pro (25% 4-bit key channels)', 'kind': 'grouped', 'boost': 0.25, 'sinks': 32},
 ]
 
 
@@ -86,6 +92,12 @@ def calibrate(captured, bits, outlier_fraction, dim, device):
             pair.append(q.to(device))
         quantizers.append(pair)
     return quantizers
+
+
+def clear_hooks(model):
+    for layer in model.layers:
+        layer.attn.kv_transform = None
+        layer.attn.kv_mix = None
 
 
 def install(model, quantizers):
@@ -145,6 +157,8 @@ def main():
     parser.add_argument('--calib_rows_per_batch', type=int, default=2048)
     parser.add_argument('--eval_batches', type=int, default=None)
     parser.add_argument('--target_tokens', type=int, default=32768)
+    parser.add_argument('--group_size', type=int, default=128,
+                        help='Tokens per key group for the KIVI / Kitty variants')
     parser.add_argument('--budget_mib', type=float, default=330.0)
     parser.add_argument('--overhead', type=float, default=1.10)
     parser.add_argument('--output_dir', default='kv_experiment')
@@ -166,27 +180,41 @@ def main():
     print('Capturing K/V for calibration...')
     captured = capture_kv(model, train_loader, device, args.calib_batches, args.calib_rows_per_batch)
 
+    kv_heads, head_dim = model.num_kv_heads, model.dim // model.num_heads
     results = []
-    for name, bits, outlier_fraction in VARIANTS:
+    for variant in VARIANTS:
+        name = variant['name']
         print(f'\n== {name}')
-        quantizers = None if bits is None else calibrate(captured, bits, outlier_fraction, dim, device)
-        install(model, quantizers)
+        clear_hooks(model)
+        if variant['kind'] == 'grouped':
+            quantizer = GroupedKVQuantizer(group_size=args.group_size, boost_ratio=variant['boost'],
+                                           sink_tokens=variant['sinks'])
+            for layer in model.layers:
+                layer.attn.kv_mix = quantizer
+            layer_bytes = quantizer.bytes_for_tokens(args.target_tokens, kv_heads, head_dim)
+            basis = 'computed from bit widths'
+        else:
+            quantizers = None if variant['kind'] == 'fp16' else \
+                calibrate(captured, 2, variant['outliers'], dim, device)
+            install(model, quantizers)
+            layer_bytes = bytes_per_token_per_layer(quantizers, dim) * args.target_tokens
+            basis = 'measured packed bytes' if quantizers else 'fp16'
         ppl, accuracy, count = evaluate(model, val_loader, device, args.eval_batches)
-        per_token = bytes_per_token_per_layer(quantizers, dim)
-        projected = per_token * model.num_layers * args.target_tokens * args.overhead / MIB
+        projected = layer_bytes * model.num_layers * args.overhead / MIB
         results.append({'variant': name, 'perplexity': ppl, 'accuracy': accuracy,
-                        'eval_tokens': count, 'bytes_per_token_per_layer': per_token,
-                        'projected_mib': projected})
+                        'eval_tokens': count, 'projected_mib': projected, 'memory_basis': basis})
         print(f'perplexity {ppl:.3f} | top-1 accuracy {accuracy:.4f} | '
-              f'{per_token} B/token/layer | {projected:.1f} MiB at {args.target_tokens} tokens')
+              f'{projected:.1f} MiB at {args.target_tokens} tokens ({basis})')
 
     baseline = results[0]
     print('\n' + '=' * 96)
-    print(f'{"variant":<36}{"ppl":>9}{"Δppl":>9}{"acc":>9}{"Δacc":>9}{"MiB@32K":>10}{"vs fp16":>9}')
+    print(f'{"variant":<38}{"ppl":>9}{"Δppl":>9}{"acc":>9}{"Δacc":>9}{"MiB@32K":>10}{"vs fp16":>9}')
     for r in results:
-        print(f'{r["variant"]:<36}{r["perplexity"]:>9.3f}{r["perplexity"] - baseline["perplexity"]:>+9.3f}'
+        print(f'{r["variant"]:<38}{r["perplexity"]:>9.3f}{r["perplexity"] - baseline["perplexity"]:>+9.3f}'
               f'{r["accuracy"]:>9.4f}{r["accuracy"] - baseline["accuracy"]:>+9.4f}'
               f'{r["projected_mib"]:>10.1f}{baseline["projected_mib"] / r["projected_mib"]:>8.1f}x')
+    print('Memory: measured from packed bytes for fp16 and our anchor scheme; computed from bit widths '
+          '(scales and zero-points included) for KIVI / Kitty.')
     ours = results[1]
     print('=' * 96)
     print(f'Memo criteria: Δppl < 1 point: {"MET" if ours["perplexity"] - baseline["perplexity"] < 1 else "NOT MET"}'

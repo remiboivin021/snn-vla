@@ -66,6 +66,10 @@ class GQAAttention(nn.Module):
         # receives (k, v) of each forward.
         self.kv_transform = None
         self.kv_capture = None
+        # kv_mix(k, v) -> (k_q, v_q, exact): scores and values come from the exact K/V where
+        # exact[i, j] is True (query i, key j) and from the quantized K/V elsewhere. Models
+        # a cache that keeps recent and sink tokens in full precision (eval only).
+        self.kv_mix = None
     
     def _expand_kv_heads(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -109,6 +113,7 @@ class GQAAttention(nn.Module):
             self.kv_capture.append((k.detach(), v.detach()))
         if self.kv_transform is not None:
             k, v = self.kv_transform(k, v)
+        mixed = self.kv_mix(k, v) if self.kv_mix is not None else None
         
         # Expand KV heads to match Q heads
         k = self._expand_kv_heads(k)
@@ -117,6 +122,14 @@ class GQAAttention(nn.Module):
         # Add to cache if provided
         if kv_cache is not None:
             k, v = kv_cache.update(k, v)
+        
+        if mixed is not None:
+            k_q, v_q, exact = mixed
+            # k and v are already expanded to the query heads; the quantized pair is not
+            output = self._mixed_attention(q, k, v, self._expand_kv_heads(k_q),
+                                           self._expand_kv_heads(v_q), exact)
+            output = output.transpose(1, 2).contiguous().view(B, seq_len, -1)
+            return self.out_proj(output)
         
         # Causal scaled dot-product attention: a position never sees later tokens
         dropout_p = self.dropout.p if self.training else 0.0
@@ -133,6 +146,15 @@ class GQAAttention(nn.Module):
         output = self.out_proj(output)
         
         return output
+    
+    def _mixed_attention(self, q, k, v, k_q, v_q, exact):
+        """Causal attention reading exact K/V where `exact` is True and quantized K/V elsewhere."""
+        T = q.shape[2]
+        scores = torch.where(exact, torch.matmul(q, k.transpose(-2, -1)),
+                             torch.matmul(q, k_q.transpose(-2, -1))) * self.scale
+        causal = torch.ones(T, T, dtype=torch.bool, device=q.device).tril()
+        probs = F.softmax(scores.masked_fill(~causal, float('-inf')), dim=-1)
+        return torch.matmul(probs * exact, v) + torch.matmul(probs * ~exact, v_q)
     
     def get_memory_usage(self, batch_size: int, seq_len: int) -> float:
         """
