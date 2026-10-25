@@ -425,7 +425,7 @@ def compare_models(args):
     print(f"  Peak Memory: {poc_mem['peak']:.2f} MB")
     
     # Also get detailed memory breakdown
-    poc_detailed_mem = poc.get_memory_usage(args.batch_size, args.max_seq_len)
+    poc_detailed_mem = poc.get_memory_usage()
     results['poc']['memory_detailed'] = poc_detailed_mem
     print(f"  Detailed breakdown:")
     for k, v in poc_detailed_mem.items():

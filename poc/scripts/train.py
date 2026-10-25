@@ -48,12 +48,15 @@ def train(args):
     
     # Print model summary
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    memory_usage = model.get_memory_usage(args.batch_size, args.seq_length)
+    memory_usage = model.get_memory_usage()
     print(f"Initial memory usage: {memory_usage['total']:.2f} MB")
     
     # Load data
     print("\nLoading data...")
-    dataset_kwargs = {'repo_id': args.repo_id} if args.dataset_type == 'lerobot' else {}
+    dataset_kwargs = {}
+    if args.dataset_type == 'lerobot':
+        dataset_kwargs = {'repo_id': args.repo_id, 'image_keys': args.image_keys,
+                          'frame_cache_dir': args.frame_cache_dir}
     train_loader = get_dataloader(
         dataset_type=args.dataset_type,
         **dataset_kwargs,
@@ -159,7 +162,7 @@ def train(args):
             # Log memory usage
             if step % args.log_interval == 0:
                 with torch.no_grad():
-                    memory_usage = model.get_memory_usage(args.batch_size, args.seq_length)
+                    memory_usage = model.get_memory_usage()
                     progress_bar.write(f"Memory: {memory_usage['total']:.2f} MB")
         
         # Calculate epoch metrics
@@ -237,6 +240,11 @@ def main():
                        help='Training data source')
     parser.add_argument('--repo_id', type=str, default='lerobot/pusht',
                        help='LeRobot dataset repo id (with --dataset_type lerobot)')
+    
+    parser.add_argument('--image_keys', nargs='*', default=[],
+                       help='LeRobot camera keys to load as frames (e.g. observation.image)')
+    parser.add_argument('--frame_cache_dir', type=str, default=None,
+                       help='Directory caching decoded video frames across epochs')
     
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=32,

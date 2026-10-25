@@ -10,6 +10,7 @@ Integrates all 4 R&D axes:
 Objectif global: 32 768 tokens contexte avec <= 330 Mio RAM
 """
 
+import psutil
 import torch
 import torch.nn as nn
 from typing import Optional, Dict, Any, List, Tuple
@@ -327,40 +328,25 @@ class VLAModel(nn.Module):
         
         return torch.cat(generated_tokens, dim=1)
     
-    def get_memory_usage(self, batch_size: int = 1, seq_len: int = 1) -> Dict[str, float]:
+    def get_memory_usage(self) -> Dict[str, float]:
         """
-        Calculate memory usage for different components.
+        Measure the memory held by the model, from real tensor sizes.
         
-        Args:
-            batch_size: Batch size for calculation
-            seq_len: Sequence length for calculation
-            
         Returns:
-            Dictionary with memory usage in MB for each component
+            Dictionary in MB: parameters, buffers, kv_cache (bytes of the cached
+            tensors, 0 while the cache is empty), total (their sum), and
+            process_rss (resident memory of the whole process, not part of total).
         """
-        memory_usage = {}
-        
-        # Model parameters
-        param_bytes = sum(p.numel() * 4 for p in self.parameters())  # fp32
-        memory_usage['parameters'] = param_bytes / (1024 * 1024)
-        
-        # KV Cache
+        mib = 1024 * 1024
+        memory_usage = {
+            'parameters': sum(p.numel() * p.element_size() for p in self.parameters()) / mib,
+            'buffers': sum(b.numel() * b.element_size() for b in self.buffers()) / mib,
+        }
         if self.use_kv_cache:
-            # At full capacity
-            k_bytes = batch_size * self.num_kv_heads * self.max_tokens * (self.dim // self.num_heads) * 4
-            v_bytes = k_bytes  # Same for V
-            memory_usage['kv_cache'] = (k_bytes + v_bytes) / (1024 * 1024)
-        
-        # Hidden states and activations
-        activation_bytes = batch_size * seq_len * self.dim * 4 * self.num_layers
-        memory_usage['activations'] = activation_bytes / (1024 * 1024)
-        
-        # DeltaNet hidden state
-        if self.use_delta_net:
-            delta_bytes = batch_size * self.delta_net.hidden_dim * 4
-            memory_usage['delta_net'] = delta_bytes / (1024 * 1024)
+            memory_usage['kv_cache'] = self.kv_cache.memory_bytes() / mib
         
         memory_usage['total'] = sum(memory_usage.values())
+        memory_usage['process_rss'] = psutil.Process().memory_info().rss / mib
         
         return memory_usage
     
@@ -458,7 +444,7 @@ if __name__ == "__main__":
     
     # Memory usage
     print("\nMemory usage breakdown:")
-    memory = model.get_memory_usage(batch_size, text_seq_len)
+    memory = model.get_memory_usage()
     for key, value in memory.items():
         print(f"  {key}: {value:.2f} MB")
     

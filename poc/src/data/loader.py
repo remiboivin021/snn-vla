@@ -50,12 +50,17 @@ def get_dataloader(dataset_type: str = 'synthetic',
         collate_fn = dataset.get_collate_fn()
         
     elif dataset_type == 'lerobot':
-        from .lerobot_data import LeRobotTokenDataset, make_lerobot_dataset
+        from .lerobot_data import FrameCache, LeRobotTokenDataset, make_lerobot_dataset
         # Episodes are already split by make_lerobot_dataset
+        image_keys = kwargs.pop('image_keys', None) or []
+        cache_dir = kwargs.pop('frame_cache_dir', None)
         dataset = LeRobotTokenDataset(
-            make_lerobot_dataset(kwargs.pop('repo_id', 'lerobot/pusht'), split=split),
+            make_lerobot_dataset(kwargs.pop('repo_id', 'lerobot/pusht'), split=split,
+                                 download_videos=bool(image_keys)),
             seq_length=seq_length,
-            vocab_size=vocab_size
+            vocab_size=vocab_size,
+            image_keys=image_keys,
+            frame_cache=FrameCache(cache_dir) if cache_dir else None
         )
         collate_fn = None
         

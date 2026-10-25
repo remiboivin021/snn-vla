@@ -163,7 +163,7 @@ def evaluate_memory(args):
             logits = model(text_tokens=text_tokens.to(device))
             
             # Get memory usage
-            memory_usage = model.get_memory_usage(args.batch_size, seq_len)
+            memory_usage = model.get_memory_usage()
             
             # Also get peak memory
             if torch.cuda.is_available():
