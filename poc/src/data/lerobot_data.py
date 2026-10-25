@@ -25,6 +25,7 @@ TASK_VOCAB = 256
 MAX_TASK_TOKENS = 64
 EPISODE_SEPARATOR = 255  # never appears in UTF-8 text
 STATE_KEY = 'observation.state'
+ENV_STATE_KEY = 'observation.environment_state'
 ACTION_KEY = 'action'
 
 
@@ -64,6 +65,58 @@ def _to_uint8(frame: torch.Tensor) -> torch.Tensor:
     return (frame.clamp(0, 1) * 255).round().to(torch.uint8)
 
 
+class TokenCodec:
+    """
+    Turns observations and actions into tokens and back. Shared by training windows and
+    closed-loop rollouts, so both see the exact same sequence layout.
+    
+    One step is: observation tokens (all state keys, in order) then action tokens.
+    """
+
+    def __init__(self, stats: Dict[str, Any], state_keys: Sequence[str], vocab_size: int):
+        num_bins = vocab_size - TASK_VOCAB
+        if num_bins < 2:
+            raise ValueError(f"vocab_size must be > {TASK_VOCAB + 1}, got {vocab_size}")
+        self.num_bins = min(num_bins, 256)
+        self.state_keys = list(state_keys)
+        self.state_range = [self._range(stats[key]) for key in self.state_keys]
+        self.action_range = self._range(stats[ACTION_KEY])
+        self.obs_len = sum(len(low) for low, _ in self.state_range)
+        self.action_len = len(self.action_range[0])
+        self.step_len = self.obs_len + self.action_len
+
+    @classmethod
+    def from_stats(cls, stats: Dict[str, Any], vocab_size: int) -> 'TokenCodec':
+        """Use every state key the dataset provides (environment state, agent state)."""
+        keys = [key for key in (ENV_STATE_KEY, STATE_KEY) if key in stats]
+        return cls(stats, keys, vocab_size)
+
+    @staticmethod
+    def _range(stat: Dict[str, Any]):
+        return torch.as_tensor(stat['min'], dtype=torch.float32), \
+               torch.as_tensor(stat['max'], dtype=torch.float32)
+
+    def _bin(self, values, low, high) -> List[int]:
+        values = torch.as_tensor(values, dtype=torch.float32).flatten()
+        unit = ((values - low) / (high - low).clamp(min=1e-8)).clamp(0, 1)
+        return (TASK_VOCAB + (unit * (self.num_bins - 1)).round().long()).tolist()
+
+    def obs_tokens(self, values: Sequence[Any]) -> List[int]:
+        """values: one entry per state key, in state_keys order."""
+        tokens = []
+        for value, (low, high) in zip(values, self.state_range):
+            tokens += self._bin(value, low, high)
+        return tokens
+
+    def action_tokens(self, action) -> List[int]:
+        return self._bin(action, *self.action_range)
+
+    def decode_action(self, tokens: Sequence[int]) -> torch.Tensor:
+        low, high = self.action_range
+        unit = (torch.as_tensor(tokens, dtype=torch.float32) - TASK_VOCAB) / (self.num_bins - 1)
+        return low + unit * (high - low)
+
+
 def make_lerobot_dataset(repo_id: str, split: str = 'train', val_fraction: float = 0.1,
                          root: str = None, download_videos: bool = False):
     """
@@ -100,29 +153,12 @@ class LeRobotTokenDataset(Dataset):
     def __init__(self, dataset, seq_length: int = 100, vocab_size: int = 50000,
                  image_keys: Sequence[str] = (), frame_cache: Optional[FrameCache] = None,
                  cross_episode: bool = False):
-        num_bins = vocab_size - TASK_VOCAB
-        if num_bins < 2:
-            raise ValueError(f"vocab_size must be > {TASK_VOCAB + 1}, got {vocab_size}")
         self.dataset = dataset
         self.seq_length = seq_length
-        self.num_bins = min(num_bins, 256)
+        self.codec = TokenCodec.from_stats(dataset.meta.stats, vocab_size)
         self.image_keys = list(image_keys)
         self.frame_cache = frame_cache
         self.cross_episode = cross_episode
-
-        stats = dataset.meta.stats
-        self.state_min, self.state_max = self._range(stats[STATE_KEY])
-        self.action_min, self.action_max = self._range(stats[ACTION_KEY])
-
-    @staticmethod
-    def _range(stat: Dict[str, Any]):
-        return torch.as_tensor(stat['min'], dtype=torch.float32), \
-               torch.as_tensor(stat['max'], dtype=torch.float32)
-
-    def _bin(self, values: torch.Tensor, low: torch.Tensor, high: torch.Tensor) -> List[int]:
-        values = torch.as_tensor(values, dtype=torch.float32).flatten()
-        unit = ((values - low) / (high - low).clamp(min=1e-8)).clamp(0, 1)
-        return (TASK_VOCAB + (unit * (self.num_bins - 1)).round().long()).tolist()
 
     def __len__(self):
         return len(self.dataset)
@@ -155,8 +191,8 @@ class LeRobotTokenDataset(Dataset):
         # +1 token: the last one is only a target
         row, i = first, idx
         while len(tokens) < self.seq_length + 1:
-            tokens += self._bin(row[STATE_KEY], self.state_min, self.state_max)
-            tokens += self._bin(row[ACTION_KEY], self.action_min, self.action_max)
+            tokens += self.codec.obs_tokens([row[key] for key in self.codec.state_keys])
+            tokens += self.codec.action_tokens(row[ACTION_KEY])
             i += 1
             if i >= len(self.dataset):
                 break
