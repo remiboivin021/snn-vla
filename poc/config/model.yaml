@@ -1,0 +1,46 @@
+# Configuration du modèle VLA pour le PoC Synobotix
+# Objectif : 32 768 tokens contexte avec <= 330 Mio RAM
+
+model:
+  # Architecture de base
+  num_layers: 12
+  hidden_dim: 512
+  num_heads: 8          # Têtes Q
+  num_kv_heads: 8      # Têtes KV (GQA) - Pivot 1
+  
+  # Cache KV
+  max_tokens: 32768    # Objectif final
+  kv_cache_bits: 2     # Quantification ternaire/2-bit
+  
+  # Types de tokens
+  token_types:
+    - text
+    - vision
+    - metadata
+  
+  # Fenêtre d'éviction asymétrique
+  vision_window_size: 100  # Tokens visuels récents sanctuarisés
+  text_compression_ratio: 0.25  # Compression agressive du texte
+
+# GQA Configuration
+GQA:
+  implementation: "grouped"  # grouped vs multi_query
+  kv_heads_ratio: 1.0      # 1:1 pour le PoC (8 têtes Q = 8 têtes KV)
+  
+# Quantification
+quantization:
+  enabled: true
+  bits: 2
+  calibration_samples: 10000
+  outlier_threshold: 0.05  # Top 5% canaux = outliers
+  
+# Hybridation récurrente (Axe 4)
+recurrent:
+  enabled: true
+  delta_net_hidden: 512
+  
+# Budget mémoire
+memory:
+  target: 330  # Mio RAM
+  overhead_factor: 1.10  # 10% de marge
+  validation_interval: 100  # Vérification tous les N tokens

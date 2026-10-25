@@ -1,0 +1,60 @@
+# Configuration de la quantification Anchor-Based (Pivot 2)
+# Approche : Quantification par canaux ancrés au lieu de Hadamard
+
+quantization:
+  # Activation globale
+  enabled: true
+  
+  # Paramètres de base
+  bits: 2                     # 2-bit ou ternaire
+  method: "anchor_based"     # vs hadamard (BitNet v2)
+  
+  # Calibration (phase hors-ligne)
+  calibration:
+    enabled: true
+    dataset: "robotic_sequences"  # ou "synthetic"
+    num_samples: 10000
+    batch_size: 100
+    
+    # Identification des outliers
+    outlier_detection:
+      method: "percentile"     # percentile ou z_score
+      threshold: 0.95         # Top 5% = outliers
+      channel_wise: true       # Par canal vs global
+    
+    # Génération du masque
+    mask_generation:
+      static: true             # Masque figé à la compilation
+      save_path: "./calibration/mask.pt"
+  
+  # Application en ligne
+  runtime:
+    # Canaux à quantifier
+    quantize_keys: true
+    quantize_values: true
+    quantize_activations: true
+    
+    # Canaux à préserver (outliers)
+    preserve_outliers: true
+    outlier_precision: "fp16"  # fp16 ou fp32
+    
+    # Quantification ternaire
+    ternary:
+      enabled: false          # Désactivé pour le PoC initial (2-bit)
+      alpha: 0.5              # Paramètre ternaire
+  
+  # 2-bit quantification
+  binary:
+    enabled: true
+    symmetric: true          # Quantification symétrique
+    
+# Validation
+validation:
+  baseline: "fp16"          # Comparaison vs FP16
+  max_perplexity_degradation: 1.0  # < 1 point (Cible A1)
+  
+# Profilage
+profiling:
+  enabled: true
+  log_memory: true
+  log_latency: true
