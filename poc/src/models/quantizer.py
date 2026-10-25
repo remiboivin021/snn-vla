@@ -90,16 +90,33 @@ class AnchorQuantizer:
         non_outlier_mask = ~self.outlier_mask
         
         if self.is_binary:
-            # 2-bit quantization: scale to [-2, 2) range
-            non_outlier_x = x_flat[:, non_outlier_mask]
-            max_vals = non_outlier_x.abs().max(dim=0).values
-            min_vals = -max_vals
+            # 2-bit quantization: 4 uniform levels per channel. The clipping range is chosen
+            # offline per channel (shrunk around the midpoint of [min, max]) to minimize the
+            # reconstruction error on the calibration data: plain min/max wastes the levels
+            # on rare extremes.
+            non_outlier_x = x_flat[:200_000, non_outlier_mask]
+            lo_all = non_outlier_x.min(dim=0).values
+            hi_all = non_outlier_x.max(dim=0).values
+            mid, half = (lo_all + hi_all) / 2, (hi_all - lo_all) / 2
             
-            # Full-dim tensors so quantize() can index them with the channel masks
+            best_err = torch.full_like(mid, float('inf'))
+            best_lo, best_scale = lo_all.clone(), ((hi_all - lo_all) / 3.0).clamp(min=1e-8)
+            for ratio in (1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3):
+                lo = mid - half * ratio
+                scale = (2 * half * ratio / 3.0).clamp(min=1e-8)
+                codes = torch.clamp(torch.round((non_outlier_x - lo) / scale), 0, 3)
+                err = ((codes * scale + lo - non_outlier_x) ** 2).mean(dim=0)
+                better = err < best_err
+                best_err = torch.where(better, err, best_err)
+                best_lo = torch.where(better, lo, best_lo)
+                best_scale = torch.where(better, scale, best_scale)
+            
+            # Full-dim tensors so quantize() can index them with the channel masks.
+            # Codes are q in {-2, -1, 0, 1}: the lowest level maps to q=-2, so zero = lo + 2 * scale.
             self.scales = torch.ones(self.dim)
             self.zeros = torch.zeros(self.dim)
-            self.scales[non_outlier_mask] = max_vals / 2.0
-            self.zeros[non_outlier_mask] = min_vals + self.scales[non_outlier_mask]
+            self.scales[non_outlier_mask] = best_scale
+            self.zeros[non_outlier_mask] = best_lo + 2 * best_scale
             
         elif self.is_ternary:
             # Ternary quantization: {-1, 0, 1}

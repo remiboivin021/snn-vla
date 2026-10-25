@@ -34,7 +34,7 @@ class GatedDeltaNet(nn.Module):
         self.out_proj = nn.Linear(self.hidden_dim, dim)
         
         # Initialize hidden state
-        self.register_buffer('hidden_state', torch.zeros(1, self.hidden_dim))
+        self.register_buffer('hidden_state', torch.zeros(1, self.hidden_dim), persistent=False)
     
     def reset_hidden(self, batch_size: int = 1):
         """Reset hidden state for new sequence."""
@@ -166,7 +166,7 @@ class MemoryBoundedDeltaNet(nn.Module):
         self.decompression_proj = nn.Linear(self.hidden_dim // 2, self.hidden_dim)
         
         # Initialize hidden state
-        self.register_buffer('hidden_state', torch.zeros(1, self.hidden_dim))
+        self.register_buffer('hidden_state', torch.zeros(1, self.hidden_dim), persistent=False)
         self.register_buffer('compressed_state', torch.zeros(1, self.hidden_dim // 2))
         self.is_compressed = False
     

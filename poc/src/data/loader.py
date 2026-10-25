@@ -60,7 +60,8 @@ def get_dataloader(dataset_type: str = 'synthetic',
             seq_length=seq_length,
             vocab_size=vocab_size,
             image_keys=image_keys,
-            frame_cache=FrameCache(cache_dir) if cache_dir else None
+            frame_cache=FrameCache(cache_dir) if cache_dir else None,
+            cross_episode=kwargs.pop('cross_episode', False)
         )
         collate_fn = None
         

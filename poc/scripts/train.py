@@ -56,7 +56,8 @@ def train(args):
     dataset_kwargs = {}
     if args.dataset_type == 'lerobot':
         dataset_kwargs = {'repo_id': args.repo_id, 'image_keys': args.image_keys,
-                          'frame_cache_dir': args.frame_cache_dir}
+                          'frame_cache_dir': args.frame_cache_dir,
+                          'cross_episode': args.cross_episode}
     train_loader = get_dataloader(
         dataset_type=args.dataset_type,
         **dataset_kwargs,
@@ -90,8 +91,12 @@ def train(args):
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
     # Learning rate scheduler
+    total_steps = args.num_epochs * len(train_loader)
+    if args.max_steps:
+        total_steps = min(total_steps, args.max_steps)
+    global_step = 0
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.num_epochs * len(train_loader)
+        optimizer, T_max=total_steps
     )
     
     # Loss function
@@ -116,6 +121,10 @@ def train(args):
             text_tokens = batch['text_tokens'].to(device)
             # For PoC, we'll use text tokens only
             # In full implementation, we'd use vision_patches and metadata too
+            
+            # Independent batches: no recurrent state carried over from the previous one
+            if model.use_delta_net:
+                model.delta_net.reset_hidden(text_tokens.shape[0])
             
             # Forward pass
             logits = forward(text_tokens=text_tokens)
@@ -143,6 +152,7 @@ def train(args):
             
             optimizer.step()
             scheduler.step()
+            global_step += 1
             
             # Update metrics
             epoch_loss += loss.item()
@@ -164,10 +174,14 @@ def train(args):
                 with torch.no_grad():
                     memory_usage = model.get_memory_usage()
                     progress_bar.write(f"Memory: {memory_usage['total']:.2f} MB")
+            
+            if args.max_steps and global_step >= args.max_steps:
+                break
         
         # Calculate epoch metrics
-        avg_train_loss = epoch_loss / len(train_loader)
-        avg_train_ppl = epoch_ppl / len(train_loader)
+        epoch_steps = step + 1  # fewer than len(train_loader) when --max_steps cuts the epoch
+        avg_train_loss = epoch_loss / epoch_steps
+        avg_train_ppl = epoch_ppl / epoch_steps
         
         # Validation
         model.eval()
@@ -177,6 +191,8 @@ def train(args):
         with torch.no_grad():
             for batch in val_loader:
                 text_tokens = batch['text_tokens'].to(device)
+                if model.use_delta_net:
+                    model.delta_net.reset_hidden(text_tokens.shape[0])
                 logits = forward(text_tokens=text_tokens)
                 
                 targets = batch['target_tokens'].to(device)
@@ -210,6 +226,9 @@ def train(args):
         # Save checkpoint
         if (epoch + 1) % args.save_interval == 0:
             model.save(os.path.join(args.output_dir, f'model_epoch_{epoch + 1}.pt'))
+        
+        if args.max_steps and global_step >= args.max_steps:
+            break
     
     # Save final model
     model.save(os.path.join(args.output_dir, 'model_final.pt'))
@@ -243,6 +262,8 @@ def main():
     
     parser.add_argument('--image_keys', nargs='*', default=[],
                        help='LeRobot camera keys to load as frames (e.g. observation.image)')
+    parser.add_argument('--cross_episode', action='store_true',
+                       help='Fill windows across episode boundaries (long contexts)')
     parser.add_argument('--frame_cache_dir', type=str, default=None,
                        help='Directory caching decoded video frames across epochs')
     
@@ -255,6 +276,8 @@ def main():
                        help='Vocabulary size')
     parser.add_argument('--num_epochs', type=int, default=10,
                        help='Number of training epochs')
+    parser.add_argument('--max_steps', type=int, default=None,
+                       help='Stop after this many optimizer steps')
     parser.add_argument('--lr', type=float, default=1e-4,
                        help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01,

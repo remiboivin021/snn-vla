@@ -23,6 +23,7 @@ from torch.utils.data import Dataset
 
 TASK_VOCAB = 256
 MAX_TASK_TOKENS = 64
+EPISODE_SEPARATOR = 255  # never appears in UTF-8 text
 STATE_KEY = 'observation.state'
 ACTION_KEY = 'action'
 
@@ -92,10 +93,13 @@ class LeRobotTokenDataset(Dataset):
         image_keys: Camera keys (e.g. 'observation.image') to return as uint8 frames of
             the first step of each window. Decoding video is slow, so pass a frame_cache.
         frame_cache: FrameCache storing decoded frames across epochs
+        cross_episode: Keep filling the window with the following episodes (separated by
+            EPISODE_SEPARATOR) instead of padding at the episode end: long contexts
     """
 
     def __init__(self, dataset, seq_length: int = 100, vocab_size: int = 50000,
-                 image_keys: Sequence[str] = (), frame_cache: Optional[FrameCache] = None):
+                 image_keys: Sequence[str] = (), frame_cache: Optional[FrameCache] = None,
+                 cross_episode: bool = False):
         num_bins = vocab_size - TASK_VOCAB
         if num_bins < 2:
             raise ValueError(f"vocab_size must be > {TASK_VOCAB + 1}, got {vocab_size}")
@@ -104,6 +108,7 @@ class LeRobotTokenDataset(Dataset):
         self.num_bins = min(num_bins, 256)
         self.image_keys = list(image_keys)
         self.frame_cache = frame_cache
+        self.cross_episode = cross_episode
 
         stats = dataset.meta.stats
         self.state_min, self.state_max = self._range(stats[STATE_KEY])
@@ -157,7 +162,10 @@ class LeRobotTokenDataset(Dataset):
                 break
             row = self.dataset.get_raw_item(i)
             if int(row['episode_index']) != episode:
-                break
+                if not self.cross_episode:
+                    break
+                episode = int(row['episode_index'])
+                tokens.append(EPISODE_SEPARATOR)
 
         tokens = tokens[:self.seq_length + 1]
         inputs = torch.zeros(self.seq_length, dtype=torch.long)

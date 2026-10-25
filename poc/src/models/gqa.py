@@ -11,6 +11,14 @@ import torch.nn.functional as F
 from einops import rearrange
 
 
+def apply_rope(x: torch.Tensor, inv_freq: torch.Tensor) -> torch.Tensor:
+    """Rotary position embedding on [B, heads, seq_len, head_dim] (positions 0..seq_len-1)."""
+    angles = torch.arange(x.shape[2], device=x.device, dtype=torch.float32)[:, None] * inv_freq
+    cos, sin = angles.cos().to(x.dtype), angles.sin().to(x.dtype)
+    x1, x2 = x[..., 0::2], x[..., 1::2]
+    return torch.stack((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1).flatten(-2)
+
+
 class GQAAttention(nn.Module):
     """
     Grouped-Query Attention (GQA) with customizable number of KV heads.
@@ -47,8 +55,17 @@ class GQAAttention(nn.Module):
         # Dropout
         self.dropout = nn.Dropout(dropout)
         
-        # Rotation Position Embedding (optionnel)
-        self.rope = None
+        # Rotary position embedding (not stored in checkpoints)
+        self.register_buffer(
+            'inv_freq',
+            1.0 / (10000 ** (torch.arange(0, self.head_dim, 2, dtype=torch.float32) / self.head_dim)),
+            persistent=False)
+        
+        # Optional hooks (experiments): kv_transform(k, v) -> (k, v) applied to the K/V that
+        # would be cached, [B, num_kv_heads, seq_len, head_dim]; kv_capture is a list that
+        # receives (k, v) of each forward.
+        self.kv_transform = None
+        self.kv_capture = None
     
     def _expand_kv_heads(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -84,6 +101,15 @@ class GQAAttention(nn.Module):
         k = k.view(B, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
         
+        # Positions are encoded in q and k; cached keys keep their rotation
+        q = apply_rope(q, self.inv_freq)
+        k = apply_rope(k, self.inv_freq)
+        
+        if self.kv_capture is not None:
+            self.kv_capture.append((k.detach(), v.detach()))
+        if self.kv_transform is not None:
+            k, v = self.kv_transform(k, v)
+        
         # Expand KV heads to match Q heads
         k = self._expand_kv_heads(k)
         v = self._expand_kv_heads(v)
@@ -92,13 +118,15 @@ class GQAAttention(nn.Module):
         if kv_cache is not None:
             k, v = kv_cache.update(k, v)
         
-        # Scaled dot-product attention
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        attn_probs = F.softmax(attn_scores, dim=-1)
-        attn_probs = self.dropout(attn_probs)
-        
-        # Apply attention to V
-        output = torch.matmul(attn_probs, v)
+        # Causal scaled dot-product attention: a position never sees later tokens
+        dropout_p = self.dropout.p if self.training else 0.0
+        if k.shape[2] == seq_len:
+            output = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p, is_causal=True)
+        else:
+            # New queries sit after the cached tokens
+            mask = torch.ones(seq_len, k.shape[2], dtype=torch.bool, device=q.device)
+            mask = mask.tril(diagonal=k.shape[2] - seq_len)
+            output = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=dropout_p)
         
         # Reshape and project back
         output = output.transpose(1, 2).contiguous().view(B, seq_len, -1)

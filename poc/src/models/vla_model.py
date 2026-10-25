@@ -109,12 +109,13 @@ class VLAModel(nn.Module):
     """
     
     def __init__(self, config_path: str = None, 
-                 quantizer_config_path: str = None):
+                 quantizer_config_path: str = None,
+                 config: dict = None, quant_config: dict = None):
         super().__init__()
         
-        # Load configurations
-        self.config = self._load_config(config_path or "config/model.yaml")
-        self.quant_config = self._load_config(quantizer_config_path or "config/quantization.yaml")
+        # Load configurations (dicts take precedence: they come from a checkpoint)
+        self.config = config or self._load_config(config_path or "config/model.yaml")
+        self.quant_config = quant_config or self._load_config(quantizer_config_path or "config/quantization.yaml")
         
         # Model parameters
         self.dim = self.config['model']['hidden_dim']
@@ -401,8 +402,8 @@ class VLAModel(nn.Module):
         """Load model from checkpoint."""
         checkpoint = torch.load(path, weights_only=True)
         
-        # Create model instance
-        model = cls()
+        # Rebuild the architecture the checkpoint was trained with
+        model = cls(config=checkpoint['config'], quant_config=checkpoint['quant_config'])
         
         # Load state dict
         model.load_state_dict(checkpoint['model'])
