@@ -19,7 +19,7 @@ def compute_perplexity(logits: torch.Tensor, targets: torch.Tensor,
     
     Args:
         logits: Model output logits [batch_size, seq_len, vocab_size]
-        targets: Ground truth tokens [batch_size, seq_len]
+        targets: Ground truth tokens [batch_size, seq_len]; -1 marks padding and is ignored
         epsilon: Small constant for numerical stability
         
     Returns:
@@ -31,7 +31,7 @@ def compute_perplexity(logits: torch.Tensor, targets: torch.Tensor,
     targets_flat = targets.view(-1)
     
     # Compute cross-entropy loss
-    ce_loss = F.cross_entropy(logits_flat, targets_flat, reduction='mean')
+    ce_loss = F.cross_entropy(logits_flat, targets_flat, reduction='mean', ignore_index=-1)
     
     # Perplexity = exp(ce_loss)
     perplexity = torch.exp(ce_loss).item()
@@ -46,7 +46,7 @@ def compute_accuracy(logits: torch.Tensor, targets: torch.Tensor,
     
     Args:
         logits: Model output logits [batch_size, seq_len, vocab_size]
-        targets: Ground truth tokens [batch_size, seq_len]
+        targets: Ground truth tokens [batch_size, seq_len]; -1 marks padding and is ignored
         top_k: Number of top predictions to consider
         
     Returns:
@@ -55,6 +55,12 @@ def compute_accuracy(logits: torch.Tensor, targets: torch.Tensor,
     batch_size, seq_len, vocab_size = logits.shape
     logits_flat = logits.view(-1, vocab_size)
     targets_flat = targets.view(-1)
+    
+    # Drop padding positions
+    valid = targets_flat != -1
+    logits_flat, targets_flat = logits_flat[valid], targets_flat[valid]
+    if targets_flat.numel() == 0:
+        return 0.0
     
     # Get top-k predictions
     if top_k == 1:
@@ -65,7 +71,7 @@ def compute_accuracy(logits: torch.Tensor, targets: torch.Tensor,
         top_k_preds = torch.topk(logits_flat, k=top_k, dim=-1).indices
         correct = torch.zeros_like(targets_flat, dtype=torch.float)
         
-        for i in range(batch_size * seq_len):
+        for i in range(targets_flat.numel()):
             if targets_flat[i] in top_k_preds[i]:
                 correct[i] = 1.0
         
