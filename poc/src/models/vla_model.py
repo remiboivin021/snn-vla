@@ -400,7 +400,7 @@ class VLAModel(nn.Module):
     @classmethod
     def load(cls, path: str) -> 'VLAModel':
         """Load model from checkpoint."""
-        checkpoint = torch.load(path, weights_only=True)
+        checkpoint = torch.load(path, map_location='cpu', weights_only=True)
         
         # Rebuild the architecture the checkpoint was trained with
         model = cls(config=checkpoint['config'], quant_config=checkpoint['quant_config'])
